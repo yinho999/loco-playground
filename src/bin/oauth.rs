@@ -34,6 +34,7 @@ fn build_oauth_client(client_id: String, client_secret: String) -> OAuth2ClientS
         Some("https://www.googleapis.com/oauth2/v3/token".to_string()),
         redirect_url,
         "https://openidconnect.googleapis.com/v1/userinfo".to_string(),
+        vec!["https://www.googleapis.com/auth/userinfo.email".to_string()],
     )
     .unwrap();
     let mut clients = BTreeMap::new();

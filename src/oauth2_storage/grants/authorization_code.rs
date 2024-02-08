@@ -19,6 +19,7 @@ pub struct AuthorizationCodeClient {
     pub profile_url: url::Url,
     pub http_client: reqwest::Client,
     pub flow_states: HashMap<String, (PkceCodeVerifier, Instant)>,
+    pub scopes: Vec<Scope>,
 }
 
 impl AuthorizationCodeClient {
@@ -30,13 +31,10 @@ impl AuthorizationCodeClient {
         token_url: Option<String>,
         redirect_url: String,
         profile_url: String,
+        scopes: Vec<String>,
     ) -> OAuth2ClientResult<Self> {
         let client_id = ClientId::new(client_id);
-        let client_secret = if let Some(client_secret) = client_secret {
-            Some(ClientSecret::new(client_secret))
-        } else {
-            None
-        };
+        let client_secret = client_secret.map(ClientSecret::new);
         let auth_url = AuthUrl::new(auth_url)?;
         let token_url = if let Some(token_url) = token_url {
             Some(TokenUrl::new(token_url)?)
@@ -47,11 +45,16 @@ impl AuthorizationCodeClient {
         let oauth2 = BasicClient::new(client_id, client_secret, auth_url, token_url)
             .set_redirect_uri(redirect_url);
         let profile_url = url::Url::parse(&profile_url)?;
+        let scopes = scopes
+            .iter()
+            .map(|scope| Scope::new(scope.to_string()))
+            .collect();
         Ok(Self {
             oauth2,
             profile_url,
             http_client: reqwest::Client::new(),
             flow_states: HashMap::new(),
+            scopes,
         })
     }
     fn remove_expire_flow(&mut self) {
@@ -82,15 +85,15 @@ pub trait AuthorizationCodeGrantTrait: Send + Sync {
         // Generate a PKCE challenge.
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-        // Generate the full authorization URL.
-        let (auth_url, csrf_token) = client
+        let mut auth_request = client
             .oauth2
-            .authorize_url(CsrfToken::new_random)
-            // Set the desired scopes.
-            .add_scope(Scope::new(
-                "https://www.googleapis.com/auth/userinfo.email".to_string(),
-            ))
-            // .add_scope(Scope::new("write".to_string()))
+            .authorize_url(CsrfToken::new_random);
+        // Add scopes
+        for scope in &client.scopes {
+            auth_request = auth_request.add_scope(scope.clone());
+        }
+        // Generate the full authorization URL.
+        let (auth_url, csrf_token) = auth_request
             // Set the PKCE code challenge.
             .set_pkce_challenge(pkce_challenge)
             .url();
