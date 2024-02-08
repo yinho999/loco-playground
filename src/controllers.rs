@@ -1,4 +1,6 @@
 use crate::app_state::AppState;
+use crate::oauth2_storage::oauth2_grant::OAuth2ClientGrantEnum;
+use crate::oauth2_storage::OAuth2ClientStore;
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -7,27 +9,55 @@ use axum::response::{Html, IntoResponse, Redirect};
 use axum::{http, Extension};
 use axum_extra::extract::PrivateCookieJar;
 use chrono::{Duration, Local};
-use oauth2::basic::BasicClient;
-use oauth2::reqwest::async_http_client;
-use oauth2::{AuthorizationCode, TokenResponse};
+
+use oauth2::{CsrfToken, TokenResponse};
 use serde::Deserialize;
+use std::sync::Arc;
+use tower_sessions::Session;
 use tracing::{error, info};
 
-pub async fn homepage(Extension(oauth_id): Extension<String>) -> Html<String> {
-    info!("Oauth ID: {}", oauth_id);
-    Html(format!("<p>Welcome!</p>
-    
-    <a href=\"https://accounts.google.com/o/oauth2/v2/auth?scope=openid%20profile%20email&client_id={oauth_id}&response_type=code&redirect_uri=http://localhost:8000/api/auth/google_callback\">
+const CSRFTOKEN: &str = "csrf_token";
+pub async fn homepage(
+    Extension(session_store): Extension<Session>,
+    Extension(oauth_client_store): Extension<Arc<OAuth2ClientStore>>,
+) -> Html<String> {
+    let client = oauth_client_store.get("google").unwrap();
+    let client = match client {
+        OAuth2ClientGrantEnum::AuthorizationCode(client) => client,
+        _ => {
+            return Html("Invalid client type".to_string());
+        }
+    };
+    let client = client.clone();
+    let mut client = client.lock().await;
+    let (auth_url, csrf_token) = client.get_authorization_url();
+    let saved_csrf_token = csrf_token.secret().to_owned();
+    session_store
+        .insert(CSRFTOKEN, saved_csrf_token)
+        .await
+        .unwrap();
+
+    Html(format!(
+        "<p>Welcome!</p>
+    <a href=\"{auth_url}\">
     Click here to sign into Google!
-     </a>"))
+     </a>
+    <p>{auth_url}</p> | <p> {csrf_token}</p> 
+     ",
+        auth_url = auth_url.to_string(),
+        csrf_token = csrf_token.secret().to_string()
+    ))
 }
 
-pub async fn hello_world() -> &'static str {
-    "Hello world!"
+pub async fn hello_world(Extension(session_store): Extension<Session>) -> String {
+    let csrf_token = session_store.get::<String>(CSRFTOKEN).await.unwrap();
+    format!("{csrf_token:?}")
 }
+
 #[derive(Debug, Deserialize)]
 pub struct AuthRequest {
     code: String,
+    state: String,
 }
 
 #[derive(Deserialize, sqlx::FromRow, Clone, Debug)]
@@ -42,32 +72,54 @@ pub async fn google_callback(
     jar: PrivateCookieJar,
     // Extract the query parameters from the request
     Query(query): Query<AuthRequest>,
+    // Extract the session from the app
+    Extension(session_store): Extension<Session>,
     // Extract the oauth client from the app
-    Extension(oauth_client): Extension<BasicClient>,
+    Extension(oauth_client_store): Extension<Arc<OAuth2ClientStore>>,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
-    // Exchange the code with a token
-    let token = match oauth_client
-        .exchange_code(AuthorizationCode::new(query.code))
-        .request_async(async_http_client)
-        .await
-    {
+    let client = oauth_client_store.get("google").unwrap();
+    let client = match client {
+        OAuth2ClientGrantEnum::AuthorizationCode(client) => client,
+        _ => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid client type".to_string(),
+            ));
+        }
+    };
+    let client = client.clone();
+    let mut client = client.lock().await;
+    let csrf_token = session_store.get::<String>(CSRFTOKEN).await.unwrap();
+    println!("{csrf_token:?}, {session_store:?}");
+    let csrf_token = match session_store.remove::<String>(CSRFTOKEN).await {
         Ok(res) => res,
         Err(e) => {
-            error!("An error occurred while exchanging the code: {e}");
+            error!("An error occurred while trying to remove csrf token: {e}");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
         }
     };
-    // Checking and getting the user's profile from Google
-    let profile = match state
-        .ctx
-        .get("https://openidconnect.googleapis.com/v1/userinfo")
-        .bearer_auth(token.access_token().secret().to_owned())
-        .send()
-        .await
-    {
-        Ok(res) => res,
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    let csrf_token = if let Some(csrf_token) = csrf_token {
+        csrf_token
+    } else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No csrf token found".to_string(),
+        ));
     };
+    println!(
+        "code: {}, state: {}, csrf token: {}",
+        query.code, query.state, csrf_token
+    );
+    let (token, profile) = client
+        .verify_user_with_code(query.code.to_string(), query.state.to_string(), csrf_token)
+        .await
+        .map_err(|e| {
+            error!("An error occurred while exchanging the code");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to exchange code".to_string(),
+            )
+        })?;
 
     // Parse the user's profile
     let profile = profile.json::<UserProfile>().await.unwrap();
@@ -128,6 +180,7 @@ pub async fn google_callback(
     info!("{jar:?}");
     Ok((jar, Redirect::to("/protected")))
 }
+
 pub async fn check_authorized(
     State(state): State<AppState>,
     jar: PrivateCookieJar,
