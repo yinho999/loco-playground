@@ -113,7 +113,7 @@ pub async fn google_callback(
     let (token, profile) = client
         .verify_user_with_code(query.code.to_string(), query.state.to_string(), csrf_token)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             error!("An error occurred while exchanging the code");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

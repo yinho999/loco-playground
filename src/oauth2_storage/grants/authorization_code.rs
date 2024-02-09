@@ -1,4 +1,3 @@
-use std::ops::{Deref, DerefMut};
 use std::{collections::HashMap, time::Instant};
 
 use oauth2::basic::BasicTokenResponse;
@@ -20,6 +19,7 @@ pub struct AuthorizationCodeClient {
     pub http_client: reqwest::Client,
     pub flow_states: HashMap<String, (PkceCodeVerifier, Instant)>,
     pub scopes: Vec<Scope>,
+    pub csrf_token_timeout: std::time::Duration,
 }
 
 impl AuthorizationCodeClient {
@@ -32,6 +32,7 @@ impl AuthorizationCodeClient {
         redirect_url: String,
         profile_url: String,
         scopes: Vec<String>,
+        timeout_seconds: Option<u64>,
     ) -> OAuth2ClientResult<Self> {
         let client_id = ClientId::new(client_id);
         let client_secret = client_secret.map(ClientSecret::new);
@@ -55,13 +56,13 @@ impl AuthorizationCodeClient {
             http_client: reqwest::Client::new(),
             flow_states: HashMap::new(),
             scopes,
+            csrf_token_timeout: std::time::Duration::from_secs(timeout_seconds.unwrap_or(10 * 60)),
         })
     }
     fn remove_expire_flow(&mut self) {
         // Remove expired tokens
-        self.flow_states.retain(|_, (_, created_at)| {
-            created_at.elapsed() < std::time::Duration::from_secs(10 * 60)
-        });
+        self.flow_states
+            .retain(|_, (_, created_at)| created_at.elapsed() < self.csrf_token_timeout);
     }
 }
 
@@ -85,9 +86,7 @@ pub trait AuthorizationCodeGrantTrait: Send + Sync {
         // Generate a PKCE challenge.
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-        let mut auth_request = client
-            .oauth2
-            .authorize_url(CsrfToken::new_random);
+        let mut auth_request = client.oauth2.authorize_url(CsrfToken::new_random);
         // Add scopes
         for scope in &client.scopes {
             auth_request = auth_request.add_scope(scope.clone());

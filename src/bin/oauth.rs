@@ -21,12 +21,6 @@ fn build_oauth_client(client_id: String, client_secret: String) -> OAuth2ClientS
     // In prod, http://localhost:8000 would get replaced by whatever your production URL is
     let redirect_url = "http://localhost:8000/api/auth/google_callback".to_string();
 
-    // If you're not using Google OAuth, you can use whatever the relevant auth/token URL is for your given OAuth service
-    let auth_url = AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
-        .expect("Invalid authorization endpoint URL");
-    let token_url = TokenUrl::new("https://www.googleapis.com/oauth2/v3/token".to_string())
-        .expect("Invalid token endpoint URL");
-
     let authorization_code_client = AuthorizationCodeClient::new(
         client_id,
         Some(client_secret),
@@ -35,6 +29,7 @@ fn build_oauth_client(client_id: String, client_secret: String) -> OAuth2ClientS
         redirect_url,
         "https://openidconnect.googleapis.com/v1/userinfo".to_string(),
         vec!["https://www.googleapis.com/auth/userinfo.email".to_string()],
+        None,
     )
     .unwrap();
     let mut clients = BTreeMap::new();
@@ -81,19 +76,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let app = Router::new()
         .route(
             "/api/auth/google_callback",
-            get(google_callback).with_state(app_state.clone()), // Efficient cloning due to Arc
+            get(google_callback), // Efficient cloning due to Arc
         )
         .route(
             "/protected",
-            get(protected)
-                .route_layer(middleware::from_fn_with_state(
-                    app_state.clone(), // Efficient cloning due to Arc
-                    check_authorized,
-                ))
-                .with_state(app_state.clone()), // Efficient cloning due to Arc
+            get(protected).route_layer(middleware::from_fn_with_state(
+                app_state.clone(), // Efficient cloning due to Arc
+                check_authorized,
+            )),
         )
         .route("/home", get(homepage))
         .route("/", get(hello_world))
+        .with_state(app_state.clone()) // Efficient cloning due to Arc
         .layer(Extension(client)) // No need to clone here if not used elsewhere
         .layer(session_layer);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8000")
