@@ -95,6 +95,11 @@ async fn patch_user(
     json_patch::patch(&mut user_json, &params)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     user = serde_json::from_value(user_json).unwrap();
+    // Update user in database
+    sqlx::query!("UPDATE users SET email = $1 WHERE id = $2", user.email, id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     println!("User: {:?}", user);
     Ok((StatusCode::OK, format!("User: {:?}", user)))
